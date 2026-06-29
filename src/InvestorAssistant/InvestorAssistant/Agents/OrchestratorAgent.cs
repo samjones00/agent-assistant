@@ -1,28 +1,23 @@
-using System.Reflection;
 using System.Text.Json;
-using Microsoft.Agents.AI;
+using InvestorAssistant.Tools;
 using Microsoft.Extensions.AI;
 
 namespace InvestorAssistant.Agents;
 
 public class OrchestratorAgent
 {
-    private readonly AIAgent _orchestrator;
-    private readonly Dictionary<string, IInvestorAgent> _subAgents;
+    private readonly IChatClient _chatClient;
+    private readonly string _systemPrompt;
+    private readonly List<AIFunction> _tools;
+    private readonly string _dataDirectory;
     private string? _investorId;
 
-    public OrchestratorAgent(IChatClient chatClient, IEnumerable<IInvestorAgent> subAgents)
+    public OrchestratorAgent(IChatClient chatClient, string systemPrompt, List<AIFunction> tools, string dataDirectory)
     {
-        var prompt = LoadPrompt("InvestorAssistant.Prompts.orchestrator.md");
-        _orchestrator = chatClient.AsAIAgent(instructions: prompt);
-        _subAgents = subAgents.ToDictionary(a => a.Category);
-    }
-
-    // Test-only constructor
-    public OrchestratorAgent(AIAgent orchestrator, Dictionary<string, IInvestorAgent> subAgents)
-    {
-        _orchestrator = orchestrator;
-        _subAgents = subAgents;
+        _chatClient = chatClient;
+        _systemPrompt = systemPrompt;
+        _tools = tools;
+        _dataDirectory = dataDirectory;
     }
 
     public async Task RunAsync(CancellationToken ct = default)
@@ -31,12 +26,30 @@ public class OrchestratorAgent
         Console.WriteLine("==========================");
         Console.WriteLine();
 
-        while (string.IsNullOrWhiteSpace(_investorId))
+        do
         {
             Console.Write("Investor ID: ");
-            _investorId = Console.ReadLine()?.Trim();
-        }
+            _investorId = Console.ReadLine()?.Trim() ?? "";
+            if (string.IsNullOrEmpty(_investorId))
+                Console.WriteLine("Investor ID is required.");
+        } while (string.IsNullOrEmpty(_investorId));
 
+        QueryCsvTool.SetSessionInvestorId(_investorId);
+
+        var profile = await LoadInvestorProfileAsync(_investorId);
+        var profileJson = JsonSerializer.Serialize(profile);
+
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.System, _systemPrompt),
+            new(ChatRole.System, $"Current investor profile: {profileJson}")
+        };
+
+        Console.WriteLine();
+        Console.WriteLine($"Welcome, {profile?["investor_name"] ?? _investorId}!");
+        Console.WriteLine("Available query categories:");
+        foreach (var (name, desc) in CategoryTool.ParseCategories(_systemPrompt))
+            Console.WriteLine($"  \u2022 {name} — {desc}");
         Console.WriteLine();
 
         while (true)
@@ -47,61 +60,91 @@ public class OrchestratorAgent
 
             try
             {
-                var route = await ClassifyAsync(question, ct);
-                var response = await RouteAsync(route, question, ct);
-                Console.WriteLine($"\nAssistant: {response}");
+                messages.Add(new(ChatRole.User, question));
+                var response = await SendWithToolLoopAsync(messages, ct);
+                Console.WriteLine($"\nAssistant: {response.Text}");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"\nAssistant: I ran into an issue processing your request. ({ex.Message})");
+                Console.WriteLine($"\nAssistant: I ran into an issue. ({ex.Message})");
             }
 
             Console.WriteLine();
         }
     }
 
-    private async Task<RouteResult> ClassifyAsync(string question, CancellationToken ct)
+    private async Task<ChatMessage> SendWithToolLoopAsync(List<ChatMessage> messages, CancellationToken ct)
     {
-        var response = await _orchestrator.RunAsync(
-            $"{{\"investor_id\":\"{_investorId}\",\"question\":\"{question}\"}}",
-            cancellationToken: ct);
+        var options = new ChatOptions { Tools = [.. _tools], Temperature = 0f };
 
-        var text = response.ToString();
-        var json = ExtractJson(text);
-        return JsonSerializer.Deserialize<RouteResult>(json)
-            ?? new RouteResult { investor_id = _investorId!, category = "portfolio", question = question };
-    }
-
-    private async Task<string> RouteAsync(RouteResult route, string originalQuestion, CancellationToken ct)
-    {
-        if (_subAgents.TryGetValue(route.category, out var agent))
+        while (true)
         {
-            return await agent.HandleAsync(route.investor_id, route.question, ct);
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(120));
+            try
+            {
+                var response = await _chatClient.GetResponseAsync(messages, options, timeoutCts.Token);
+                var assistantMsg = response.Messages.Last();
+                messages.Add(assistantMsg);
+
+                var toolCalls = assistantMsg.Contents.OfType<FunctionCallContent>().ToList();
+                if (toolCalls.Count == 0)
+                    return assistantMsg;
+
+                foreach (var call in toolCalls)
+                {
+                    try
+                    {
+                        var tool = _tools.FirstOrDefault(t => t.Name == call.Name);
+                        if (tool != null)
+                        {
+                            var aiArgs = call.Arguments != null
+                                ? new AIFunctionArguments(call.Arguments.ToDictionary(k => k.Key, v => v.Value))
+                                : null;
+                            var result = await tool.InvokeAsync(aiArgs, ct);
+                            var resultJson = result is string s ? s : JsonSerializer.Serialize(result);
+                            messages.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent(call.CallId, resultJson)]));
+                        }
+                        else
+                        {
+                            messages.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent(call.CallId, JsonSerializer.Serialize(new { error = $"Tool '{call.Name}' not found" }))]));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        messages.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent(call.CallId, JsonSerializer.Serialize(new { error = ex.Message }))]));
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                messages.Add(new ChatMessage(ChatRole.Assistant, "I'm sorry, the request timed out. Please try again."));
+                return messages.Last();
+            }
         }
-
-        return await _subAgents["portfolio"].HandleAsync(route.investor_id, originalQuestion, ct);
     }
 
-    private static string ExtractJson(string text)
+    private async Task<Dictionary<string, object>?> LoadInvestorProfileAsync(string investorId)
     {
-        var start = text.IndexOf('{');
-        var end = text.LastIndexOf('}');
-        return start >= 0 && end > start ? text[start..(end + 1)] : "{}";
-    }
+        var path = Path.Combine(_dataDirectory, "investors.csv");
+        if (!File.Exists(path)) return null;
 
-    private static string LoadPrompt(string resourceName)
-    {
-        var assembly = Assembly.GetExecutingAssembly();
-        using var stream = assembly.GetManifestResourceStream(resourceName)
-            ?? throw new FileNotFoundException($"Embedded resource '{resourceName}' not found.");
-        using var reader = new StreamReader(stream);
-        return reader.ReadToEnd();
-    }
+        var lines = await File.ReadAllLinesAsync(path);
+        if (lines.Length < 2) return null;
 
-    private record RouteResult
-    {
-        public string investor_id { get; init; } = "";
-        public string category { get; init; } = "";
-        public string question { get; init; } = "";
+        var headers = lines[0].Split(',').Select(h => h.Trim()).ToArray();
+        for (int i = 1; i < lines.Length; i++)
+        {
+            if (string.IsNullOrWhiteSpace(lines[i])) continue;
+            var values = lines[i].Split(',').Select(v => v.Trim().Trim('"')).ToArray();
+            if (values.Length >= 1 && values[0] == investorId)
+            {
+                var profile = new Dictionary<string, object>();
+                for (int j = 0; j < headers.Length && j < values.Length; j++)
+                    profile[headers[j]] = values[j];
+                return profile;
+            }
+        }
+        return null;
     }
 }

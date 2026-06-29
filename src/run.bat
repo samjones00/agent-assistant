@@ -5,66 +5,49 @@ echo EquiTie Investor Assistant - Setup and Run
 echo ==========================================
 echo.
 
-REM Try native Ollama first
-where ollama >nul 2>&1
-if not errorlevel 1 goto native
-
-REM Fallback to Podman
 where podman >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Neither Ollama nor Podman found.
-    echo Install Ollama from https://ollama.com
+    echo ERROR: Podman not found. Install from https://podman.io
     exit /b 1
 )
-goto podman
 
-REM -------------------------------------------------------
-:native
-echo Using native Ollama...
-ollama serve >nul 2>&1
-if errorlevel 1 (
-    echo Starting ollama.exe in background...
-    start /b ollama serve
-)
-echo Waiting for Ollama API at http://localhost:11434 ...
-:wait_native
-timeout /t 2 /nobreak >nul
-curl -s http://localhost:11434/api/tags >nul 2>&1
-if errorlevel 1 goto wait_native
-set LLM_ENDPOINT=http://localhost:11434/v1
-goto ready
-
-REM -------------------------------------------------------
-:podman
-echo Using Podman...
-podman machine info >nul 2>&1
+echo Checking Podman connection...
+podman info >nul 2>&1
 if errorlevel 1 (
     echo Starting Podman machine...
     podman machine start
 )
+
+echo.
 podman rm -f llm-server >nul 2>&1
-echo Starting ollama container...
+
+echo Starting Ollama container...
 podman run -d --name llm-server -p 11434:11434 ollama/ollama
 if errorlevel 1 (
-    echo Failed to start container. Try native Ollama instead.
+    echo Port 11434 may be in use. Check with: netstat -ano ^| findstr :11434
     exit /b 1
 )
-echo Waiting for LLM at http://localhost:11434 ...
-:wait_podman
+
+echo Waiting for Ollama API...
+:wait_loop
 timeout /t 2 /nobreak >nul
 curl -s http://localhost:11434/api/tags >nul 2>&1
-if errorlevel 1 goto wait_podman
-set LLM_ENDPOINT=http://localhost:11434/v1
-goto ready
+if errorlevel 1 goto wait_loop
 
-REM -------------------------------------------------------
-:ready
-echo LLM API is ready at %LLM_ENDPOINT%
+for /f "usebackq delims=" %%i in (`powershell -NoProfile -File "%~dp0scripts\get-model.ps1" -ConfigPath "%~dp0InvestorAssistant\InvestorAssistant\appsettings.json"`) do set "MODEL=%%i"
 
-echo Pulling phi4-mini model...
-ollama pull phi4-mini
+echo Ollama API is ready.
+echo Pulling %MODEL% model...
+podman exec llm-server ollama pull %MODEL%
 
 echo.
 cd /d "%~dp0InvestorAssistant\InvestorAssistant"
-set LLM__Endpoint=%LLM_ENDPOINT%
+set LLM__Endpoint=http://localhost:11434/v1
 dotnet run
+
+echo.
+set /p CLEANUP=Stop and remove the container (y/N)?
+if /i "!CLEANUP!"=="y" (
+    podman stop llm-server
+    podman rm llm-server
+)

@@ -44,3 +44,6 @@ bld/
 
 ## Environment
 appsettings.*.local.json
+
+# Contains GitHub API token
+appsettings.json

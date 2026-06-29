@@ -13,25 +13,20 @@ chat loop over the CSV data — no auth, no production infra.
 ┌──────────────┐     ┌──────────────────────────────────────┐     ┌─────────────┐
 │  User (CLI   │────▶│  MAF Agent (Microsoft.Agents.AI)     │────▶│  LLM        │
 │  or Web UI)  │     │  - ChatCompletionAgent                │     │  (Azure     │
-│              │◀────│  - MCP Client (tool calling)          │◀────│   OpenAI)   │
+│              │◀────│  - AIFunction tools (in-process)      │◀────│   OpenAI)   │
 └──────────────┘     │  - PromptTemplate with Handlebars     │     └─────────────┘
-                      │  - Personalisation Middleware         │
-                      └──────────────┬───────────────────────┘
-                                     │ calls MCP tools
-                            ┌────────▼────────┐
-                            │  MCP Servers    │
-                            │  - CSV Query    │
-                            │  - Calculator   │
-                            └────────┬────────┘
-                                     │ reads
-                            ┌────────▼────────┐
-                            │  CSV Data Store │
-                            │  (11 CSV files) │
-                            └─────────────────┘
+                       │  - Personalisation Middleware         │
+                       │  - CsvService + CalcService          │
+                       └──────────────┬───────────────────────┘
+                                      │ reads
+                             ┌────────▼────────┐
+                             │  CSV Data Store │
+                             │  (11 CSV files) │
+                             └─────────────────┘
 ```
 
 Single-process .NET console app or minimal ASP.NET web app. The MAF agent orchestrates the
-loop: receive prompt, select tool, call MCP server, feed results back to LLM, return answer.
+loop: receive prompt, select tool, call local C# function, feed results back to LLM, return answer.
 
 ## 3. Technology Stack
 
@@ -40,7 +35,7 @@ loop: receive prompt, select tool, call MCP server, feed results back to LLM, re
 | Runtime | .NET 10 / C# 14 | Latest LTS, MAF target |
 | Agent framework | Microsoft Agent Framework 1.0 (`Microsoft.Agents.AI`) | Unified SK + AutoGen, native MCP support, C# first-class |
 | LLM | Azure OpenAI GPT-4o (or OpenAI fallback) | Strong tool calling, fast, available on Azure |
-| MCP SDK | `ModelContextProtocol` v1.2+ | Stable NuGet, stdio/HTTP transport |
+| Tool registry | MAF `AIFunction` | Tools registered as C# lambdas, no external process |
 | Prompt templates | Handlebars (via `Handlebars.Net`) | Lightweight, MAF-compatible, no-JSON templates |
 | Data layer | CSV loaded in memory via `CsvHelper` | Simple, matches provided dataset; no DB needed for prototype |
 | Personalisation | Custom middleware in agent pipeline | Reads investor profile, selects tone/depth template |
@@ -52,8 +47,17 @@ loop: receive prompt, select tool, call MCP server, feed results back to LLM, re
 
 - `ChatCompletionAgent` configured with system prompt + tool definitions.
 - Agent pipeline includes middleware for personalisation (injects investor profile into context).
-- Tools registered as `AIFunction` instances that delegate to MCP server calls.
+- Tools registered as `AIFunction` instances wrapping local service methods.
 - Session-scoped memory via `FileMemoryProvider` (agent-file-memory).
+
+### 4.7 Personalisation Middleware
+
+Runs before each LLM call. Loads investor profile from `investors.csv`, then computes derived signals:
+- **Deal count** — count of active allocations for this investor
+- **Top sectors** — join allocations → deals → companies, rank by commitment
+- **Portfolio concentration** — % of total commitment in top sector
+
+These signals + raw profile fields (`age`, `tech_savviness`) select the tone/depth template variant and inject into the system prompt. All personalisation is purely presentational — underlying numbers never change.
 
 ### 4.2 LLM Connector
 
@@ -61,20 +65,22 @@ loop: receive prompt, select tool, call MCP server, feed results back to LLM, re
 - Model: `gpt-4o` — strong at numeric reasoning, tool selection, and following tone instructions.
 - Fallback: OpenAI direct API if Azure unavailable.
 
-### 4.3 MCP Client
+### 4.3 Tool Registry
 
-- `McpClient` configured per server (stdio transport pointing to a local .NET process).
-- Discovers tools (e.g. `query_csv`, `calculate_moic`) at startup via `ListToolsAsync`.
-- Forwards LLM tool calls to the appropriate MCP server and returns results.
+- Tools are registered as MAF `AIFunction` instances at startup via `ToolRegistration.cs`.
+- Each tool is a pure C# function — no external process, no serialisation overhead.
+- Functions are decorated with `[Description]` attributes so the LLM understands their purpose and params.
 
-### 4.4 MCP Servers
+### 4.4 Tool Services
 
-Two MCP servers for the prototype:
+Two in-process service classes:
 
-- **CsvQueryServer** — exposes `query_csv(table, filters, columns)` and `get_schema()` tools.
-  Reads CSVs into in-memory SQLite (or DuckDB) for efficient querying.
-- **CalcServer** — exposes `calculate(expression)` for numeric operations (MOIC, multiples)
-  that the LLM delegates rather than computing inline.
+- **CsvService** — exposes `QueryCsvAsync(table, filters, columns)` and `GetSchemaAsync()`.
+  Reads CSVs into in-memory SQLite (or DuckDB) for efficient querying. Returns row-level
+  provenance (file path + line number) alongside each result set. Registered as a singleton.
+- **CalcService** — exposes `CalculateAsync(expression)` for numeric operations (MOIC, multiples)
+  that the LLM delegates rather than computing inline, plus `FxConvertAsync(amount, from_currency,
+  to_currency)` that uses `fx_rates.csv` for multi-currency conversion at query time.
 
 ### 4.5 Prompt Template Engine
 
@@ -113,7 +119,7 @@ User: "What's my current portfolio value?"
 4. LLM decides to call query_csv(table="allocations", filters={investor_id}, columns=[...])
   │
   ▼
-5. MAF agent invokes MCP client → CsvQueryServer → returns CSV rows
+5. MAF agent invokes `AIFunction` → CsvService.QueryCsvAsync → returns CSV rows
   │
   ▼
 6. LLM receives tool results, may call additional tools:
@@ -127,35 +133,55 @@ User: "What's my current portfolio value?"
 8. Agent returns response to UI, cites source rows
 ```
 
-### 5.2 Tool Calling via MCP
+### 5.2 Tool Calling
 
-- Agent → MCP Client → stdio/HTTP → MCP Server (CsvQueryServer)
-- JSON-RPC request/response over stdio
-- Tool definitions advertised at connect time via `ListTools`
-- Each tool result includes row-level provenance (file, line number) for citation
+- Agent → `AIFunction` → CsvService / CalcService (in-process)
+- Tool definitions registered at startup via `ToolRegistration.cs` using `[Description]` attributes.
+- Each tool result includes row-level provenance (file, line number) for citation.
+  The LLM is instructed to cite these (e.g. "allocations.csv line 42") inline in its
+  answer for every number presented.
 
 ## 6. Prompt Templates
 
 Templates are Handlebars files parametrised by investor profile. Examples:
 
 - **Portfolio Overview**: "You are {{investor_name}}. Here is a summary of your portfolio..."
-  — plain vs data-dense variant selected by `tech_savviness` score.
+  — plain vs data-dense variant selected by `tech_savviness` score and derived deal count.
 - **Position Detail**: "Your position in {{company_name}} across {{round_count}} round(s)..."
-  — includes cost basis per round, blended share price.
-- **Obligations**: "Upcoming capital calls: {{capital_calls}}"
-- **Fees**: "On {{deal_name}} you pay {{effective_mgmt_fee}}% management fee..."
-- **Personalisation**: "You invest mainly in {{top_sector}}. Here is how your portfolio is
-  performing..." — reflects portfolio shape.
+  — includes cost basis per round, blended share price. Handles multi-round aggregation
+  (Forgecraft Robotics Seed + Series A + Series B) and similar-name disambiguation
+  (Northpeak Analytics vs Northpeak Health) via explicit tool filters.
+- **Obligations**: "Upcoming capital calls: {{capital_calls}}" — distinguishes commitment vs
+  contributed, flags pending/unfunded allocations.
+- **Fees**: "On {{deal_name}} you pay {{effective_mgmt_fee}}% management fee..." — compares
+  effective rate to deal standard to show discount.
+- **Valuations**: Shows mark history, distinguishes markups from markdowns; zero-value
+  for written-off companies.
+- **Distributions**: Gross vs net of performance fee, realised vs unrealised split
+  (partial secondaries).
+- **Statement**: Plain-language summary of signed cash flows (negative = out, positive = in),
+  converted to reporting currency.
+- **Personalisation**: "You invest mainly in {{top_sector}} with {{deal_count}} deals. Here
+  is how your portfolio is performing..." — reflects portfolio shape and concentration.
+
+Template variants per category: `plain` (Low tech_savviness, jargon explained), `balanced`
+(Medium), `data_dense` (High, many deals, concise with tables). The underlying numbers are
+identical across variants — only tone, depth, and framing change.
+
+Edge cases from the dataset (multi-round companies, per-investor share-price discounts,
+FX conversion, write-offs, down rounds, similar names, partial secondaries, zero-holdings
+investors) are handled through prompt instruction and tool-calling patterns rather than
+special-case code.
 
 Templates live in `Prompts/{category}.hbs` and are loaded at startup by the template engine.
 
-## 7. MCP Server Inventory
+## 7. Tool Inventory
 
-| Server | Tools | Purpose |
+| Service | Tools | Purpose |
 |---|---|---|
-| CsvQueryServer | `query_csv`, `get_schema` | Query CSV dataset with filters and aggregation |
-| CalcServer | `calculate` | Safe numeric eval (MOIC, sums, percentages) |
-| (Future) DocumentServer | `get_document`, `list_documents` | Retrieve deal documents (out of scope for prototype) |
+| CsvService | `query_csv`, `get_schema` | Query CSV dataset with filters and aggregation; returns row-level provenance |
+| CalcService | `calculate`, `fx_convert` | Safe numeric eval (MOIC, sums, percentages) + FX conversion via fx_rates.csv |
+| (Future) DocService | `get_document`, `list_documents` | Retrieve deal documents (out of scope for prototype) |
 
 ## 8. Configuration & Settings
 
@@ -167,15 +193,8 @@ Templates live in `Prompts/{category}.hbs` and are loaded at startup by the temp
     "Endpoint": "https://...",
     "ApiKey": "..."
   },
-  "MCP": {
-    "CsvQueryServer": {
-      "Transport": "stdio",
-      "Command": "dotnet run --project src/CsvQueryServer"
-    },
-    "CalcServer": {
-      "Transport": "stdio",
-      "Command": "dotnet run --project src/CalcServer"
-    }
+  "Data": {
+    "CsvPath": "./data"
   },
   "Investor": {
     "DefaultInvestorId": "inv_001"
@@ -209,11 +228,8 @@ investor-assistant/
 │   │   ├── InvestorAgent.cs
 │   │   ├── PersonalisationMiddleware.cs
 │   │   └── ToolRegistration.cs
-│   ├── CsvQueryServer/                 # MCP server: CSV queries
-│   │   ├── Program.cs
-│   │   └── CsvService.cs
-│   └── CalcServer/                     # MCP server: calculations
-│       ├── Program.cs
+│   └── InvestorAssistant.Services/     # In-process tool services
+│       ├── CsvService.cs
 │       └── CalcService.cs
 ├── data/                               # CSV dataset (not committed)
 │   ├── investors.csv
@@ -239,7 +255,7 @@ investor-assistant/
 ### Basic Q&A Flow
 
 ```
-User              MAF Agent            LLM (gpt-4o)      CsvQueryServer      CalcServer
+User              MAF Agent            LLM (gpt-4o)      CsvService          CalcService
  │                    │                    │                    │                 │
  │── "What's my ─────▶│                    │                    │                 │
  │  portfolio value?"  │── system prompt ──▶│                    │                 │
@@ -257,13 +273,18 @@ User              MAF Agent            LLM (gpt-4o)      CsvQueryServer      Cal
  │◀── response ──────│                    │                    │                 │
 ```
 
-## 11. Prototype Roadmap
+## 11. Guardrails (Note)
+
+Guardrails around investment advice, audit trail, and data protection are explicitly out of
+scope for the prototype. They are addressed in the separate build-roadmap.md for production.
+
+## 12. Prototype Roadmap
 
 Prototype (this build — ~2-3 hours):
 
-1. Scaffold MAF console app with MCP client/server
-2. Implement CsvQueryServer (in-memory SQLite over CSVs)
-3. Implement CalcServer (safe expression eval)
+1. Scaffold MAF console app with tool registration
+2. Implement CsvService (in-memory SQLite over CSVs)
+3. Implement CalcService (safe expression eval + FX conversion)
 4. Wire agent: system prompt, tool registration, personalisation middleware
 5. Write Handlebars prompt templates (3-4 query types)
 6. End-to-end test with 3 investor scenarios
