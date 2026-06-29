@@ -1,0 +1,20 @@
+EquiTie Investor Assistant
+==========================
+
+Investor ID: 
+Welcome, 1!
+Available query categories:
+
+You: 
+Assistant: ```json
+{
+  "name": "query_csv",
+  "arguments": {
+    "table": "allocations",
+    "filters": "{\"investor_id\":\"INV001\"}",
+    "columns": "deal_id,commitment_amount,units,contributed_amount"
+  }
+}
+```
+
+You: 

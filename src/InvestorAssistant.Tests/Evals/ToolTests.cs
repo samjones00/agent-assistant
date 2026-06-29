@@ -1,7 +1,7 @@
 using System.Text.Json;
 using InvestorAssistant.Tools;
 
-namespace InvestorAssistant.Evals;
+namespace InvestorAssistant.Tests.Evals;
 
 public sealed class ToolTests
 {
@@ -9,37 +9,28 @@ public sealed class ToolTests
     {
         var dataDir = EvalHelpers.GetDataDir();
         QueryCsvTool.Configure(dataDir);
+        ColumnMappings.Load(dataDir);
         CalcTool.LoadFxRates(dataDir);
     }
-
-    // ============================================================
-    // QueryCsvTool
-    // ============================================================
 
     [Fact]
     public async Task QueryCsv_Investors_ReturnsInvestor()
     {
         var result = await QueryCsvTool.QueryCsvAsync("investors", """{"investor_id":"INV001"}""", "investor_id,investor_name");
-        var json = JsonSerializer.Deserialize<JsonElement>(result);
-        Assert.Equal("INV001", json.GetProperty("investor_id").GetString());
+        var lines = result.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.True(lines.Length >= 2);
+        Assert.Contains("investor_id", lines[0]);
+        Assert.Contains("INV001", lines[1]);
     }
 
     [Fact]
     public async Task QueryCsv_Allocations_FiltersByInvestor()
     {
         var result = await QueryCsvTool.QueryCsvAsync("allocations", """{"investor_id":"INV001"}""", "deal_id,investor_id");
-        var json = JsonSerializer.Deserialize<JsonElement>(result);
-
-        if (json.ValueKind == JsonValueKind.Array)
-        {
-            Assert.True(json.GetArrayLength() > 0);
-            foreach (var row in json.EnumerateArray())
-                Assert.Equal("INV001", row.GetProperty("investor_id").GetString());
-        }
-        else
-        {
-            Assert.Equal("INV001", json.GetProperty("investor_id").GetString());
-        }
+        var lines = result.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.True(lines.Length >= 2);
+        foreach (var line in lines.Skip(1))
+            Assert.Contains("INV001", line);
     }
 
     [Fact]
@@ -56,8 +47,8 @@ public sealed class ToolTests
     {
         QueryCsvTool.SetSessionInvestorId("INV001");
         var result = await QueryCsvTool.QueryCsvAsync("allocations", """{"investor_id":"INV001"}""", "deal_id");
-        var json = JsonSerializer.Deserialize<JsonElement>(result);
-        Assert.True(json.ValueKind == JsonValueKind.Array || json.ValueKind == JsonValueKind.Object);
+        var lines = result.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.True(lines.Length >= 2);
     }
 
     [Fact]
@@ -72,14 +63,10 @@ public sealed class ToolTests
     public async Task QueryCsv_AllColumns_ReturnsAll()
     {
         var result = await QueryCsvTool.QueryCsvAsync("fx_rates", "{}", "*");
-        var json = JsonSerializer.Deserialize<JsonElement>(result);
-        Assert.Equal(JsonValueKind.Array, json.ValueKind);
-        Assert.True(json.GetArrayLength() > 0);
+        var lines = result.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.True(lines.Length >= 2);
+        Assert.Contains("currency", lines[0], StringComparison.OrdinalIgnoreCase);
     }
-
-    // ============================================================
-    // CalcTool
-    // ============================================================
 
     [Fact]
     public void Calculate_BasicArithmetic()
@@ -122,16 +109,13 @@ public sealed class ToolTests
         Assert.True(json.TryGetProperty("error", out _));
     }
 
-    // ============================================================
-    // Prompt resources
-    // ============================================================
-
     [Fact]
     public void SystemPrompt_Exists()
     {
         var content = EvalHelpers.LoadPrompt("InvestorAssistant.Prompts.system.md");
         Assert.False(string.IsNullOrWhiteSpace(content));
-        Assert.Contains("query_csv", content);
+        Assert.Contains("Portfolio Overview()", content);
+        Assert.Contains("Obligations()", content);
     }
 
     [Fact]
@@ -139,6 +123,6 @@ public sealed class ToolTests
     {
         var content = EvalHelpers.LoadPrompt("InvestorAssistant.Prompts.templates.md");
         Assert.False(string.IsNullOrWhiteSpace(content));
-        Assert.Contains("single_position", content);
+        Assert.Contains("Response format", content);
     }
 }

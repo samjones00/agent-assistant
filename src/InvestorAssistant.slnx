@@ -1,6 +1,4 @@
 <Solution>
-  <Folder Name="/InvestorAssistant/">
-    <Project Path="InvestorAssistant/InvestorAssistant.Evals/InvestorAssistant.Evals.csproj" />
-    <Project Path="InvestorAssistant/InvestorAssistant/InvestorAssistant.csproj" />
-  </Folder>
+  <Project Path="InvestorAssistant.Tests/InvestorAssistant.Tests.csproj" />
+  <Project Path="InvestorAssistant/InvestorAssistant.csproj" />
 </Solution>
