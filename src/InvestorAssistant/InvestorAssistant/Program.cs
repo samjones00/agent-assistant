@@ -18,7 +18,8 @@ var endpoint = config[$"{providerKey}:Endpoint"]
 var modelId = config[$"{providerKey}:ModelId"]
     ?? throw new InvalidOperationException($"Missing ModelId for LLM provider '{providerName}'");
 var apiKey = config[$"{providerKey}:ApiKey"] ?? "";
-var dataDirectory = config["DataDirectory"] ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "EquiTie - Senior Software Engineer - Case Study", "data"));
+var dataDirectory = !string.IsNullOrEmpty(config["DataDirectory"])
+    ? config["DataDirectory"]! : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "EquiTie - Senior Software Engineer - Case Study", "data"));
 
 QueryCsvTool.Configure(dataDirectory);
 CalcTool.LoadFxRates(dataDirectory);

@@ -29,6 +29,9 @@ public static class CategoryTool
             var trimmed = lines[i].TrimStart();
             if (!trimmed.StartsWith("### ")) continue;
 
+            // Skip indented ### (e.g. inside Wrong:/Correct: examples)
+            if (lines[i][0] != '#') continue;
+
             var name = trimmed[3..].Trim();
             if (name is "Response format rules" or "help") continue;
 
