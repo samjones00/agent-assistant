@@ -47,6 +47,3 @@ appsettings.*.local.json
 
 ## AI tooling
 .localpilot/
-
-# Contains GitHub API token
-appsettings.json
