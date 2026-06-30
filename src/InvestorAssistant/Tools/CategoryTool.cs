@@ -1,24 +1,9 @@
-using System.ComponentModel;
 using System.Reflection;
-using System.Text.Json;
 
 namespace InvestorAssistant.Tools;
 
 public static class CategoryTool
 {
-    [Description("Lists the available query categories the assistant can help with. Returns each category name and a short description.")]
-    public static string ListCategories()
-    {
-        var asm = typeof(CategoryTool).Assembly;
-        using var stream = asm.GetManifestResourceStream("InvestorAssistant.Prompts.system.md")
-            ?? throw new FileNotFoundException("Embedded resource 'system.md' not found.");
-        using var reader = new StreamReader(stream);
-        var content = reader.ReadToEnd();
-
-        var categories = ParseCategories(content);
-        return JsonSerializer.Serialize(categories);
-    }
-
     public static (string Name, string Description)[] ParseCategories(string markdown)
     {
         var lines = markdown.Split('\n');

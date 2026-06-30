@@ -44,22 +44,23 @@ public class OrchestratorAgent
         {
             profile = null;
             do
-            {
-                Console.Write("Investor ID: ");
-                _investorId = Console.ReadLine()?.Trim() ?? "";
-                if (string.IsNullOrEmpty(_investorId))
                 {
-                    Console.WriteLine("Investor ID is required.");
-                    continue;
-                }
-                QueryCsvTool.SetSessionInvestorId(_investorId);
-                profile = await LoadInvestorProfileAsync(_investorId);
-                if (profile == null)
-                    Console.WriteLine($"Investor '{_investorId}' not found. Please try again.");
-            } while (profile == null);
-        }
+                    Console.Write("Investor ID: ");
+                    _investorId = Console.ReadLine()?.Trim() ?? "";
+                    if (string.IsNullOrEmpty(_investorId))
+                    {
+                        Console.WriteLine("Investor ID is required.");
+                        continue;
+                    }
+                    profile = await LoadInvestorProfileAsync(_investorId);
+                    if (profile == null)
+                        Console.WriteLine($"Investor '{_investorId}' not found. Please try again.");
+                } while (profile == null);
+            }
 
-        QueryCsvTool.SetSessionInvestorId(_investorId);
+            QueryCsvTool.SetSessionInvestorId(_investorId);
+            var reportingCurrency = profile?.GetValueOrDefault("reporting_currency")?.ToString() ?? "USD";
+            QueryCsvTool.SetSessionReportingCurrency(reportingCurrency);
         var profileJson = JsonSerializer.Serialize(profile);
 
         var messages = new List<ChatMessage>
@@ -116,7 +117,7 @@ public class OrchestratorAgent
                 if (toolCalls.Count == 0)
                     return new AssistantResult(assistantMsg, executedTools);
 
-                var wrapperTools = new[] { "Portfolio Overview", "Single Position", "Distributions", "Obligations", "Fees", "Valuations", "Account Statement" };
+                var wrapperTools = new[] { "portfolio_overview", "single_position", "distributions", "obligations", "fees", "valuations", "account_statement" };
 
                 foreach (var call in toolCalls)
                 {

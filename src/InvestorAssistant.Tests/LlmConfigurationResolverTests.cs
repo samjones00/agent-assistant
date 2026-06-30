@@ -31,18 +31,6 @@ public static class LlmConfigurationResolverTests
     }
 
     [Fact]
-    public static void Resolve_UsesModelOverride_WithDefaultProvider()
-    {
-        var config = BuildConfig();
-        var args = new[] { "--model", "custom-model" };
-
-        var result = LlmConfigurationResolver.Resolve(config, args);
-
-        result.ProviderName.Should().Be("GitHubModels");
-        result.ModelId.Should().Be("custom-model");
-    }
-
-    [Fact]
     public static void Resolve_UsesProviderFromPositionalArgument()
     {
         var config = BuildConfig();
@@ -52,29 +40,6 @@ public static class LlmConfigurationResolverTests
 
         result.ProviderName.Should().Be("Ollama");
         result.ModelId.Should().Be("llama3.1:latest");
-    }
-
-    [Fact]
-    public static void Resolve_AppliesModelOverride_ForCustomProvider()
-    {
-        var config = BuildConfig();
-        var args = new[] { "Ollama", "--model", "llama3.2" };
-
-        var result = LlmConfigurationResolver.Resolve(config, args);
-
-        result.ProviderName.Should().Be("Ollama");
-        result.ModelId.Should().Be("llama3.2");
-    }
-
-    [Fact]
-    public static void Resolve_IgnoresModelOverrideAsProviderName()
-    {
-        var config = BuildConfig();
-        var args = new[] { "--model", "llama3.1:latest" };
-
-        var result = LlmConfigurationResolver.Resolve(config, args);
-
-        result.ProviderName.Should().Be("GitHubModels");
     }
 
     [Fact]

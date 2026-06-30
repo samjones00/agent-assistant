@@ -38,5 +38,14 @@ curl -s -X POST http://localhost:11434/api/generate -d "{\"model\":\"llama3.1\",
 echo Model loaded.
 
 echo.
-cd /d "%~dp0InvestorAssistant\InvestorAssistant"
+cd /d "%~dp0src\InvestorAssistant"
+
+echo Building...
+dotnet build -v q --nologo >nul 2>&1
+if errorlevel 1 (
+    echo Build failed. Run dotnet build manually for details.
+    dotnet build
+    exit /b 1
+)
+
 dotnet run -- Ollama

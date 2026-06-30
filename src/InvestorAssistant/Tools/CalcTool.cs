@@ -2,7 +2,6 @@ using System.ComponentModel;
 using System.Data;
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Extensions.AI;
 
 namespace InvestorAssistant.Tools;
 
@@ -71,9 +70,20 @@ public static class CalcTool
         if (!_fxRates.TryGetValue(to, out var toRate))
             return JsonSerializer.Serialize(new { error = $"Unknown currency: {toCurrency}" });
 
-        var inUsd = amount * fromRate;
-        var result = inUsd / toRate;
-
+        var result = amount * fromRate / toRate;
         return JsonSerializer.Serialize(new { amount = Math.Round(result, 2), currency = toCurrency });
+    }
+
+    public static double ConvertValue(double amount, string fromCurrency, string toCurrency)
+    {
+        if (_fxRates == null) return amount;
+
+        var from = fromCurrency.Trim().ToUpperInvariant();
+        var to = toCurrency.Trim().ToUpperInvariant();
+
+        if (from == to || !_fxRates.TryGetValue(from, out var fromRate) || !_fxRates.TryGetValue(to, out var toRate))
+            return amount;
+
+        return amount * fromRate / toRate;
     }
 }

@@ -1,9 +1,11 @@
-using System.Text.Json;
+using System.Globalization;
 
 namespace InvestorAssistant.Tools;
 
 public static class PortfolioHelperTool
 {
+    private static double ConvertCurrencyAmount(double amount, string fromCurrency, string toCurrency)
+        => CalcTool.ConvertValue(amount, fromCurrency, toCurrency);
     public static Task<string> GetPortfolioOverviewDirect() =>
         GetPortfolioOverview(QueryCsvTool.SessionInvestorId ?? "");
 
@@ -27,15 +29,19 @@ public static class PortfolioHelperTool
 
     public static async Task<string> GetPortfolioOverview(string investorId)
     {
+        var reportingCurrency = QueryCsvTool.SessionReportingCurrency ?? "USD";
+
         var allocPath = Path.Combine(QueryCsvTool.DataDirectory!, "allocations.csv");
         var dealsPath = Path.Combine(QueryCsvTool.DataDirectory!, "deals.csv");
         var compPath = Path.Combine(QueryCsvTool.DataDirectory!, "portfolio_companies.csv");
         var valPath = Path.Combine(QueryCsvTool.DataDirectory!, "valuations.csv");
+        var distPath = Path.Combine(QueryCsvTool.DataDirectory!, "distributions.csv");
 
         var allocLines = await File.ReadAllLinesAsync(allocPath);
         var dealLines = await File.ReadAllLinesAsync(dealsPath);
         var compLines = await File.ReadAllLinesAsync(compPath);
         var valLines = await File.ReadAllLinesAsync(valPath);
+        var distLines = await File.ReadAllLinesAsync(distPath);
 
         var dealHeaders = dealLines[0].Split(',');
         var dealRows = dealLines.Skip(1).Select(l => ParseRow(l, dealHeaders)).ToList();
@@ -50,7 +56,31 @@ public static class PortfolioHelperTool
             .Where(r => r.GetValueOrDefault("investor_id", "") == investorId)
             .ToList();
 
+        if (allocRows.Count == 0)
+            return "You have no investments yet.";
+
+        var distHeaders = distLines[0].Split(',');
+        var distRows = distLines.Skip(1).Select(l => ParseRow(l, distHeaders))
+            .Where(d => d.GetValueOrDefault("investor_id", "") == investorId).ToList();
+
+        var distByDeal = distRows
+            .GroupBy(d => d.GetValueOrDefault("deal_id", ""))
+            .ToDictionary(g => g.Key, g =>
+            {
+                var net = 0.0;
+                var fraction = 0.0;
+                foreach (var d in g)
+                {
+                    _ = double.TryParse(d.GetValueOrDefault("net_amount", ""), out var n);
+                    net += n;
+                    _ = double.TryParse(d.GetValueOrDefault("fraction_of_units", ""), out var f);
+                    fraction += f;
+                }
+                return (net, fraction);
+            });
+
         var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"All amounts in {reportingCurrency}");
         sb.AppendLine(string.Join(" | ", ColumnMappings.GetTableDisplayNames("portfolio_overview")));
 
         foreach (var alloc in allocRows)
@@ -58,11 +88,14 @@ public static class PortfolioHelperTool
             var dealId = alloc.GetValueOrDefault("deal_id", "");
             var units = double.TryParse(alloc.GetValueOrDefault("units", ""), out var u) ? u : 0;
             var contributed = double.TryParse(alloc.GetValueOrDefault("contributed_amount", ""), out var c) ? c : 0;
-            var commitment = alloc.GetValueOrDefault("commitment_amount", "");
+            var commitment = double.TryParse(alloc.GetValueOrDefault("commitment_amount", ""), out var comm) ? comm : 0;
+            var status = alloc.GetValueOrDefault("allocation_status", "");
+            var allocCurrency = alloc.GetValueOrDefault("deal_currency", "USD");
 
             var deal = dealRows.FirstOrDefault(d => d.GetValueOrDefault("deal_id", "") == dealId);
             var companyId = deal?.GetValueOrDefault("company_id", "") ?? "";
             var round = deal?.GetValueOrDefault("round", "") ?? "";
+            var dealStatus = deal?.GetValueOrDefault("status", "") ?? "";
             var company = compRows.FirstOrDefault(cp => cp.GetValueOrDefault("company_id", "") == companyId);
             var companyName = company?.GetValueOrDefault("company_name", "") ?? companyId;
 
@@ -70,11 +103,23 @@ public static class PortfolioHelperTool
                 .OrderByDescending(v => v.GetValueOrDefault("valuation_date", ""))
                 .FirstOrDefault();
             var latestPrice = double.TryParse(latestVal?.GetValueOrDefault("share_price", ""), out var lp) ? lp : 0;
+            var markSource = latestVal?.GetValueOrDefault("mark_source", "") ?? "";
             var valDate = latestVal?.GetValueOrDefault("valuation_date", "") ?? "";
-            var currentValue = units * latestPrice;
-            var moic = contributed > 0 ? currentValue / contributed : 0;
 
-            sb.AppendLine($"{dealId} | {companyName} | {round} | {commitment} | {units:F2} | {contributed:F2} | {currentValue:F2} | {moic:F2}x | {latestPrice} | {valDate}");
+            var (distNet, distFraction) = distByDeal.GetValueOrDefault(dealId, (0, 0));
+            var unrealisedFraction = Math.Max(0, 1 - distFraction);
+            var currentValue = units * latestPrice * unrealisedFraction;
+            var contributedConv = ConvertCurrencyAmount(contributed, allocCurrency, reportingCurrency);
+            var commitmentConv = ConvertCurrencyAmount(commitment, allocCurrency, reportingCurrency);
+            var currentValueConv = ConvertCurrencyAmount(currentValue, allocCurrency, reportingCurrency);
+            var distNetConv = ConvertCurrencyAmount(distNet, allocCurrency, reportingCurrency);
+
+            var realised = status == "Pending" || contributed == 0;
+            var writtenOff = dealStatus == "Written Off" || (latestPrice == 0 && markSource == "Write Off");
+            var moic = contributedConv > 0 ? (currentValueConv + distNetConv) / contributedConv : 0;
+
+            var statusTag = realised ? " (Pending)" : writtenOff ? " (Written Off)" : "";
+            sb.AppendLine($"{dealId} | {companyName}{statusTag} | {round} | {commitmentConv:F2} | {units:F2} | {contributedConv:F2} | {currentValueConv:F2} | {moic:F2}x | {latestPrice} | {valDate}");
         }
 
         return sb.ToString().TrimEnd();
@@ -82,15 +127,19 @@ public static class PortfolioHelperTool
 
     public static async Task<string> GetSinglePosition(string investorId, string companyName)
     {
+        var reportingCurrency = QueryCsvTool.SessionReportingCurrency ?? "USD";
+
         var allocPath = Path.Combine(QueryCsvTool.DataDirectory!, "allocations.csv");
         var dealsPath = Path.Combine(QueryCsvTool.DataDirectory!, "deals.csv");
         var compPath = Path.Combine(QueryCsvTool.DataDirectory!, "portfolio_companies.csv");
         var valPath = Path.Combine(QueryCsvTool.DataDirectory!, "valuations.csv");
+        var distPath = Path.Combine(QueryCsvTool.DataDirectory!, "distributions.csv");
 
         var dealLines = await File.ReadAllLinesAsync(dealsPath);
         var compLines = await File.ReadAllLinesAsync(compPath);
         var valLines = await File.ReadAllLinesAsync(valPath);
         var allocLines = await File.ReadAllLinesAsync(allocPath);
+        var distLines = await File.ReadAllLinesAsync(distPath);
 
         var dealHeaders = dealLines[0].Split(',');
         var dealRows = dealLines.Skip(1).Select(l => ParseRow(l, dealHeaders)).ToList();
@@ -100,6 +149,9 @@ public static class PortfolioHelperTool
         var valRows = valLines.Skip(1).Select(l => ParseRow(l, valHeaders)).ToList();
         var allocHeaders = allocLines[0].Split(',');
         var allocRows = allocLines.Skip(1).Select(l => ParseRow(l, allocHeaders)).ToList();
+        var distHeaders = distLines[0].Split(',');
+        var distRows = distLines.Skip(1).Select(l => ParseRow(l, distHeaders))
+            .Where(d => d.GetValueOrDefault("investor_id", "") == investorId).ToList();
 
         var matchCompany = compRows.FirstOrDefault(c =>
             c.GetValueOrDefault("company_name", "").Contains(companyName, StringComparison.OrdinalIgnoreCase));
@@ -109,8 +161,24 @@ public static class PortfolioHelperTool
         var deals = dealRows.Where(d => d.GetValueOrDefault("company_id", "") == companyId).ToList();
         if (deals.Count == 0) return $"No deals found for {companyName}.";
 
+        var distByDeal = distRows
+            .GroupBy(d => d.GetValueOrDefault("deal_id", ""))
+            .ToDictionary(g => g.Key, g =>
+            {
+                var net = 0.0;
+                var fraction = 0.0;
+                foreach (var d in g)
+                {
+                    _ = double.TryParse(d.GetValueOrDefault("net_amount", ""), out var n);
+                    net += n;
+                    _ = double.TryParse(d.GetValueOrDefault("fraction_of_units", ""), out var f);
+                    fraction += f;
+                }
+                return (net, fraction);
+            });
+
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"Position in {matchCompany.GetValueOrDefault("company_name", "")}");
+        sb.AppendLine($"Position in {matchCompany.GetValueOrDefault("company_name", "")} (all amounts in {reportingCurrency})");
         sb.AppendLine(string.Join(" | ", ColumnMappings.GetTableDisplayNames("single_position")));
 
         foreach (var deal in deals)
@@ -124,16 +192,29 @@ public static class PortfolioHelperTool
 
             var units = double.TryParse(alloc.GetValueOrDefault("units", ""), out var u) ? u : 0;
             var contributed = double.TryParse(alloc.GetValueOrDefault("contributed_amount", ""), out var c) ? c : 0;
+            var status = alloc.GetValueOrDefault("allocation_status", "");
+            var allocCurrency = alloc.GetValueOrDefault("deal_currency", "USD");
 
             var latestVal = valRows.Where(v => v.GetValueOrDefault("deal_id", "") == dealId)
                 .OrderByDescending(v => v.GetValueOrDefault("valuation_date", ""))
                 .FirstOrDefault();
             var latestPrice = double.TryParse(latestVal?.GetValueOrDefault("share_price", ""), out var lp) ? lp : 0;
+            var markSource = latestVal?.GetValueOrDefault("mark_source", "") ?? "";
             var valDate = latestVal?.GetValueOrDefault("valuation_date", "") ?? "";
-            var currentValue = units * latestPrice;
-            var moic = contributed > 0 ? currentValue / contributed : 0;
 
-            sb.AppendLine($"{dealId} | {round} | {units:F2} | {contributed:F2} | {currentValue:F2} | {moic:F2}x | {latestPrice} | {valDate}");
+            var (distNet, distFraction) = distByDeal.GetValueOrDefault(dealId, (0, 0));
+            var unrealisedFraction = Math.Max(0, 1 - distFraction);
+            var currentValue = units * latestPrice * unrealisedFraction;
+            var contributedConv = ConvertCurrencyAmount(contributed, allocCurrency, reportingCurrency);
+            var currentValueConv = ConvertCurrencyAmount(currentValue, allocCurrency, reportingCurrency);
+            var distNetConv = ConvertCurrencyAmount(distNet, allocCurrency, reportingCurrency);
+
+            var dealStatus = deal.GetValueOrDefault("status", "");
+            var writtenOff = dealStatus == "Written Off" || (latestPrice == 0 && markSource == "Write Off");
+            var moic = contributedConv > 0 ? (currentValueConv + distNetConv) / contributedConv : 0;
+
+            var statusTag = status == "Pending" ? " (Pending)" : writtenOff ? " (Written Off)" : "";
+            sb.AppendLine($"{dealId} | {round}{statusTag} | {units:F2} | {contributedConv:F2} | {currentValueConv:F2} | {moic:F2}x | {latestPrice} | {valDate}");
         }
 
         return sb.ToString().TrimEnd();

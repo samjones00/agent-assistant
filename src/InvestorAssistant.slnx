@@ -1,4 +1,9 @@
 <Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="../ai-workflow.md" />
+    <File Path="../README.md" />
+    <File Path="../roadmap.md" />
+  </Folder>
   <Project Path="InvestorAssistant.Tests/InvestorAssistant.Tests.csproj" />
   <Project Path="InvestorAssistant/InvestorAssistant.csproj" />
 </Solution>

@@ -12,14 +12,11 @@ var config = new ConfigurationBuilder()
     .AddEnvironmentVariables()
     .Build();
 
-var investorIdIdx = Array.IndexOf(args, "--investor-id");
-var investorId = (investorIdIdx >= 0 && investorIdIdx + 1 < args.Length) ? args[investorIdIdx + 1]
-    : args.FirstOrDefault(a => a.StartsWith("--investor-id="))?.Split('=', 2).LastOrDefault();
-
 var llmConfig = LlmConfigurationResolver.Resolve(config, args);
 var endpoint = llmConfig.Endpoint;
 var modelId = llmConfig.ModelId;
 var apiKey = llmConfig.ApiKey;
+var investorId = llmConfig.InvestorId;
 var dataDirectory = config["DataDirectory"] ?? throw new InvalidOperationException("Missing DataDirectory in config");
 
 QueryCsvTool.Configure(dataDirectory);
@@ -36,20 +33,19 @@ var chatClient = new OpenAIClient(
     .GetChatClient(modelId)
     .AsIChatClient();
 
-var systemPrompt = LoadEmbeddedResource("InvestorAssistant.Prompts.system.md")
-    + "\n\n" + LoadEmbeddedResource("InvestorAssistant.Prompts.templates.md");
+var systemPrompt = LoadEmbeddedResource("InvestorAssistant.Prompts.system.md");
 
 var tools = new List<AIFunction>
 {
-    AIFunctionFactory.Create(PortfolioHelperTool.GetPortfolioOverviewDirect, "Portfolio Overview"),
-    AIFunctionFactory.Create(PortfolioHelperTool.GetSinglePositionDirect, "Single Position"),
-    AIFunctionFactory.Create(PortfolioHelperTool.GetDistributionsDirect, "Distributions"),
-    AIFunctionFactory.Create(PortfolioHelperTool.GetObligationsDirect, "Obligations"),
-    AIFunctionFactory.Create(PortfolioHelperTool.GetFeesDirect, "Fees"),
-    AIFunctionFactory.Create(PortfolioHelperTool.GetValuationsDirect, "Valuations"),
-    AIFunctionFactory.Create(PortfolioHelperTool.GetAccountStatementDirect, "Account Statement"),
-    AIFunctionFactory.Create(CalcTool.Calculate, "Calculate"),
-    AIFunctionFactory.Create(CalcTool.ConvertCurrency, "Convert Currency"),
+    AIFunctionFactory.Create(PortfolioHelperTool.GetPortfolioOverviewDirect, "portfolio_overview"),
+    AIFunctionFactory.Create(PortfolioHelperTool.GetSinglePositionDirect, "single_position"),
+    AIFunctionFactory.Create(PortfolioHelperTool.GetDistributionsDirect, "distributions"),
+    AIFunctionFactory.Create(PortfolioHelperTool.GetObligationsDirect, "obligations"),
+    AIFunctionFactory.Create(PortfolioHelperTool.GetFeesDirect, "fees"),
+    AIFunctionFactory.Create(PortfolioHelperTool.GetValuationsDirect, "valuations"),
+    AIFunctionFactory.Create(PortfolioHelperTool.GetAccountStatementDirect, "account_statement"),
+    AIFunctionFactory.Create(CalcTool.Calculate, "calculate"),
+    AIFunctionFactory.Create(CalcTool.ConvertCurrency, "convert_currency"),
 };
 
 var orchestrator = new OrchestratorAgent(chatClient, systemPrompt, tools, dataDirectory);

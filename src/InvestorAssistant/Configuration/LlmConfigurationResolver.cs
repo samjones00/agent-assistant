@@ -2,7 +2,7 @@ using Microsoft.Extensions.Configuration;
 
 namespace InvestorAssistant.Configuration;
 
-internal record LlmConfiguration(string ProviderName, string ModelId, string Endpoint, string ApiKey);
+internal record LlmConfiguration(string ProviderName, string ModelId, string Endpoint, string ApiKey, string? InvestorId);
 
 internal static class LlmConfigurationResolver
 {
@@ -13,31 +13,31 @@ internal static class LlmConfigurationResolver
 
         var consumedIndices = new HashSet<int>();
 
-        var modelOverride = GetOptionValue(args, "--model", consumedIndices);
-        var providerOverride = GetOptionValue(args, "--provider", consumedIndices);
-        _ = GetOptionValue(args, "--investor-id", consumedIndices);
+        var investorId = GetOptionValue(args, "--investor-id", consumedIndices);
 
         var positionalProvider = args
             .Where((arg, index) => !consumedIndices.Contains(index) && !IsNamedOption(arg))
             .FirstOrDefault();
 
-        var providerName = providerOverride
-            ?? positionalProvider
-            ?? config["LLM:Default"]
-            ?? "GitHubModels";
+        var providerName = positionalProvider
+            ?? config["LLM:Default"];
+
+        if (string.IsNullOrWhiteSpace(providerName))
+            throw new InvalidOperationException(
+                "No LLM provider specified. Pass a provider name as argument or set LLM:Default in configuration.");
 
         var providerKey = $"LLM:Providers:{providerName}";
         var endpoint = config[$"{providerKey}:Endpoint"];
         if (string.IsNullOrWhiteSpace(endpoint))
             throw new InvalidOperationException($"LLM provider '{providerName}' is not configured. Add it under LLM:Providers in configuration.");
 
-        var modelId = modelOverride ?? config[$"{providerKey}:ModelId"];
+        var modelId = config[$"{providerKey}:ModelId"];
         if (string.IsNullOrWhiteSpace(modelId))
             throw new InvalidOperationException($"Missing ModelId for LLM provider '{providerName}'.");
 
         var apiKey = config[$"{providerKey}:ApiKey"] ?? string.Empty;
 
-        return new LlmConfiguration(providerName, modelId!, endpoint!, apiKey);
+        return new LlmConfiguration(providerName, modelId!, endpoint!, apiKey, investorId);
     }
 
     private static string? GetOptionValue(string[] args, string optionName, HashSet<int> consumed)

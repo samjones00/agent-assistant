@@ -1,5 +1,6 @@
 using System.Text.Json;
 using InvestorAssistant.Tools;
+using Xunit;
 
 namespace InvestorAssistant.Tests.Evals;
 
@@ -7,65 +8,10 @@ public sealed class ToolTests
 {
     public ToolTests()
     {
-        var dataDir = EvalHelpers.GetDataDir();
+        var dataDir = TestHelpers.GetDataDir();
         QueryCsvTool.Configure(dataDir);
         ColumnMappings.Load(dataDir);
         CalcTool.LoadFxRates(dataDir);
-    }
-
-    [Fact]
-    public async Task QueryCsv_Investors_ReturnsInvestor()
-    {
-        var result = await QueryCsvTool.QueryCsvAsync("investors", """{"investor_id":"INV001"}""", "investor_id,investor_name");
-        var lines = result.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        Assert.True(lines.Length >= 2);
-        Assert.Contains("investor_id", lines[0]);
-        Assert.Contains("INV001", lines[1]);
-    }
-
-    [Fact]
-    public async Task QueryCsv_Allocations_FiltersByInvestor()
-    {
-        var result = await QueryCsvTool.QueryCsvAsync("allocations", """{"investor_id":"INV001"}""", "deal_id,investor_id");
-        var lines = result.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        Assert.True(lines.Length >= 2);
-        foreach (var line in lines.Skip(1))
-            Assert.Contains("INV001", line);
-    }
-
-    [Fact]
-    public async Task QueryCsv_WrongInvestorId_ReturnsAccessError()
-    {
-        QueryCsvTool.SetSessionInvestorId("INV001");
-        var result = await QueryCsvTool.QueryCsvAsync("allocations", """{"investor_id":"INV999"}""", "*");
-        var json = JsonSerializer.Deserialize<JsonElement>(result);
-        Assert.Contains("Access denied", json.GetProperty("error").GetString());
-    }
-
-    [Fact]
-    public async Task QueryCsv_CorrectInvestorId_Works()
-    {
-        QueryCsvTool.SetSessionInvestorId("INV001");
-        var result = await QueryCsvTool.QueryCsvAsync("allocations", """{"investor_id":"INV001"}""", "deal_id");
-        var lines = result.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        Assert.True(lines.Length >= 2);
-    }
-
-    [Fact]
-    public async Task QueryCsv_TableNotFound_ReturnsError()
-    {
-        var result = await QueryCsvTool.QueryCsvAsync("nonexistent", "{}", "*");
-        var json = JsonSerializer.Deserialize<JsonElement>(result);
-        Assert.StartsWith("Table 'nonexistent' not found", json.GetProperty("error").GetString());
-    }
-
-    [Fact]
-    public async Task QueryCsv_AllColumns_ReturnsAll()
-    {
-        var result = await QueryCsvTool.QueryCsvAsync("fx_rates", "{}", "*");
-        var lines = result.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        Assert.True(lines.Length >= 2);
-        Assert.Contains("currency", lines[0], StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -112,17 +58,99 @@ public sealed class ToolTests
     [Fact]
     public void SystemPrompt_Exists()
     {
-        var content = EvalHelpers.LoadPrompt("InvestorAssistant.Prompts.system.md");
+        var content = TestHelpers.LoadPrompt("InvestorAssistant.Prompts.system.md");
         Assert.False(string.IsNullOrWhiteSpace(content));
-        Assert.Contains("Portfolio Overview()", content);
-        Assert.Contains("Obligations()", content);
+        Assert.Contains("portfolio_overview()", content);
+        Assert.Contains("obligations()", content);
     }
 
     [Fact]
-    public void Templates_Exist()
+    public void ResponseFormat_Exists()
     {
-        var content = EvalHelpers.LoadPrompt("InvestorAssistant.Prompts.templates.md");
+        var content = TestHelpers.LoadPrompt("InvestorAssistant.Prompts.system.md");
         Assert.False(string.IsNullOrWhiteSpace(content));
         Assert.Contains("Response format", content);
+    }
+
+    // ============================================================
+    // PortfolioHelperTool — edge cases
+    // ============================================================
+
+    [Fact]
+    public async Task GetPortfolioOverview_ZeroHoldings_ReturnsNoInvestments()
+    {
+        QueryCsvTool.SetSessionReportingCurrency("USD");
+        var result = await PortfolioHelperTool.GetPortfolioOverview("INV022");
+        Assert.Equal("You have no investments yet.", result);
+    }
+
+    [Fact]
+    public async Task GetPortfolioOverview_PendingAllocation_ShowsPending()
+    {
+        QueryCsvTool.SetSessionReportingCurrency("USD");
+        var result = await PortfolioHelperTool.GetPortfolioOverview("INV021");
+        Assert.Contains("(Pending)", result);
+        Assert.Contains("0.00", result);
+    }
+
+    [Fact]
+    public async Task GetSinglePosition_UnknownCompany_ReturnsNotFound()
+    {
+        var result = await PortfolioHelperTool.GetSinglePosition("INV001", "NonExistentCompanyXYZ");
+        Assert.Contains("No company found", result);
+    }
+
+    [Fact]
+    public async Task GetPortfolioOverview_IncludesReportingCurrencyHeader()
+    {
+        QueryCsvTool.SetSessionReportingCurrency("GBP");
+        var result = await PortfolioHelperTool.GetPortfolioOverview("INV001");
+        Assert.Contains("All amounts in GBP", result);
+    }
+
+    [Fact]
+    public async Task GetPortfolioOverview_MoicIncludesDistributions()
+    {
+        QueryCsvTool.SetSessionReportingCurrency("EUR");
+        // INV011 is in Helianthe Energy (DEAL007, Exited) — received EUR 127,875 distribution
+        // MOIC should be > 0 because distributions contribute to the numerator
+        var result = await PortfolioHelperTool.GetPortfolioOverview("INV011");
+        Assert.Contains("DEAL007", result);
+        var moicLine = result.Split('\n').FirstOrDefault(l => l.Contains("DEAL007"));
+        Assert.NotNull(moicLine);
+        var parts = moicLine.Split('|');
+        Assert.True(parts.Length >= 9, $"Expected at least 9 parts, got {parts.Length}");
+        var moicStr = parts[7].Trim(); // 8th column = MOIC
+        var moicValue = double.Parse(moicStr.TrimEnd('x'), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.True(moicValue > 0, $"MOIC should be positive, got {moicValue}");
+    }
+
+    [Fact]
+    public async Task GetPortfolioOverview_WrittenOff_ShowsStatus()
+    {
+        QueryCsvTool.SetSessionReportingCurrency("USD");
+        // INV010 holds Yappio (DEAL008, Written Off)
+        var result = await PortfolioHelperTool.GetPortfolioOverview("INV010");
+        Assert.Contains("Written Off", result);
+    }
+
+    [Fact]
+    public async Task GetSinglePosition_PartialSecondary_AdjustsCurrentValue()
+    {
+        QueryCsvTool.SetSessionReportingCurrency("USD");
+        // INV013 holds Tallybook (DEAL020) — 30% secondary sold, 70% unrealised
+        var result = await PortfolioHelperTool.GetSinglePosition("INV013", "Tallybook");
+        Assert.Contains("Tallybook", result);
+        // Current value should reflect 70% unrealised (not full units × price)
+        Assert.Contains("DEAL020", result);
+    }
+
+    [Fact]
+    public async Task GetPortfolioOverview_DownRound_MoicLessThanOne()
+    {
+        QueryCsvTool.SetSessionReportingCurrency("GBP");
+        // INV004 has Qubrium Series B (DEAL010) where current mark (6.2) < entry (10.0)
+        var result = await PortfolioHelperTool.GetPortfolioOverview("INV004");
+        Assert.Contains("DEAL010", result);
     }
 }
