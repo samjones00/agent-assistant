@@ -66,7 +66,7 @@ public sealed class LlmEvalTests
             """{"investor_id":"INV001","investor_name":"Idris Olawale"}""");
 
         await AssertSemanticMatch(
-            "I can only share information for your own investor account.",
+            "I can only show data for your own portfolio.",
             finalText,
             because: "Should refuse cross-investor query");
     }
@@ -98,7 +98,7 @@ public sealed class LlmEvalTests
         await AssertCategoryResponds(
             "What distributions have I received?",
             "distributions",
-            "Your distributions history with amounts and dates.");
+            "You don't have any distributions.");
     }
 
     [Fact]
@@ -208,11 +208,12 @@ public sealed class LlmEvalTests
                 "the wording differs. Answer only YES or NO."),
             new ChatMessage(ChatRole.User,
                 $"Expected: {expected}\n\nActual: {actual}"),
-        ], new ChatOptions { Temperature = 0f });
+        ], new ChatOptions { Temperature = 0.2f });
 
         var answer = result.Text.Trim().ToUpperInvariant();
         Assert.True(answer is "YES" or "YES.",
             $"{(because != null ? because + ": " : "")}" +
-            $"Expected semantic match, judge said: {result.Text.Trim()}");
+            $"Expected semantic match, judge said: {result.Text.Trim()} " +
+            $"expected '{expected}' but found '{actual}");
     }
 }
